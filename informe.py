@@ -12,7 +12,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 # Configura la localización a español
-locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+locale.setlocale(locale.LC_ALL, 'es_ES')
 
 # ----------------- Funciones originales -----------------
 
