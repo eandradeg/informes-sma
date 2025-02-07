@@ -7,7 +7,9 @@ import re, locale, os
 import openpyxl
 from io import BytesIO
 from PIL import Image as PILImage
-from docx.shared import Inches, Cm
+from docx.shared import Inches, Cm, Pt
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 # Configura la localización a español
 locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
@@ -78,17 +80,55 @@ def replace_texts(paragraph, placeholders, counter):
     return counter
 
 def process_headers_and_footers(doc, placeholders):
-    """Procesa encabezados y pies de página del documento Word."""
+    """Procesa encabezados y pies de página del documento Word,
+    asegurando que los marcadores de fecha y número de informe se inserten como texto plano.
+    """
     for section in doc.sections:
         header = section.header
         footer = section.footer
-        for paragraph in header.paragraphs:
-            replace_texts(paragraph, placeholders, [0])
+
+        # Procesar encabezados que estén dentro de tablas (si existen)
         for table in header.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for paragraph in cell.paragraphs:
-                        replace_texts(paragraph, placeholders, [0])
+                        # Procesar fecha de informe con "Cuenca,"
+                        if "«FECHA_DE_INFORME»" in paragraph.text:
+                            paragraph.clear()
+                            run = paragraph.add_run("Cuenca, ")  # Agregar "Cuenca, "
+                            run.font.name = 'Arial'
+                            run.font.size = Pt(9)
+                            run = paragraph.add_run(placeholders.get("«FECHA_DE_INFORME»", ""))
+                            run.font.name = 'Arial'
+                            run.font.size = Pt(9)
+                        
+                        # Procesar número de informe
+                        if "«NÚMERO__DE_INFORME»" in paragraph.text:
+                            paragraph.clear()
+                            run = paragraph.add_run(placeholders.get("«NÚMERO__DE_INFORME»", ""))
+                            run.font.name = 'Arial'
+                            run.font.size = Pt(10)
+
+        # Procesar párrafos del encabezado fuera de tablas
+        for paragraph in header.paragraphs:
+            # Procesar fecha de informe con "Cuenca,"
+            if "«FECHA_DE_INFORME»" in paragraph.text:
+                paragraph.clear()
+                run = paragraph.add_run("Cuenca, ")  # Agregar "Cuenca, "
+                run.font.name = 'Arial'
+                run.font.size = Pt(9)
+                run = paragraph.add_run(placeholders.get("«FECHA_DE_INFORME»", ""))
+                run.font.name = 'Arial'
+                run.font.size = Pt(9)
+            
+            # Procesar número de informe
+            if "«NÚMERO__DE_INFORME»" in paragraph.text:
+                paragraph.clear()
+                run = paragraph.add_run(placeholders.get("«NÚMERO__DE_INFORME»", ""))
+                run.font.name = 'Arial'
+                run.font.size = Pt(10)
+
+        # El procesamiento del pie de página permanece sin cambios
         for paragraph in footer.paragraphs:
             replace_texts(paragraph, placeholders, [0])
         for table in footer.tables:
@@ -97,7 +137,7 @@ def process_headers_and_footers(doc, placeholders):
                     for paragraph in cell.paragraphs:
                         replace_texts(paragraph, placeholders, [0])
 
-def process_doc_elements(doc, placeholders, selected_supervisor):
+def process_doc_elements(doc, placeholders, selected_supervisor, recomendaciones):
     """
     Recorre los elementos (párrafos y tablas) del cuerpo del documento,
     reemplazando marcadores y actualizando según el supervisor seleccionado.
@@ -116,6 +156,28 @@ def process_doc_elements(doc, placeholders, selected_supervisor):
                         replace_placeholder(paragraph, "Ing. Mauricio Sánchez Pinos", selected_supervisor)
                         if selected_supervisor == "Ing. Mesías Vizuete López":
                             replace_placeholder(paragraph, "PROFESIONAL TÉCNICO 1", "ANALISTA TÉCNICO 2")
+    
+    # Reemplazar párrafos de recomendaciones
+    if recomendaciones:  # Verifica si hay texto de recomendaciones para insertar
+        start_recomendaciones = False  # Bandera para marcar cuando encontremos la sección
+        recommendations_added = False   # Bandera para controlar que solo se inserte una vez
+        for paragraph in doc.paragraphs:  # Itera sobre todos los párrafos del documento
+            # Detecta el inicio de la sección de recomendaciones
+            if "RECOMENDACIONES" in paragraph.text:
+                start_recomendaciones = True
+                continue  # Salta este párrafo para no modificar el título
+            if start_recomendaciones:
+                # Detecta el final de la sección de recomendaciones
+                if "Informe realizado por:" in paragraph.text:
+                    start_recomendaciones = False
+                    break  # Sale del bucle al encontrar el final
+                # Si aún no se han agregado las recomendaciones
+                if not recommendations_added:
+                    paragraph.clear()  # Limpia el contenido actual del párrafo
+                    paragraph.add_run(recomendaciones)  # Agrega el nuevo texto
+                    recommendations_added = True  # Marca que ya se agregaron las recomendaciones
+                else:
+                    paragraph.clear()  # Solo limpia los párrafos restantes
     return counter
 
 # ----------------- Funciones nuevas para buscar e insertar el gráfico -----------------
@@ -158,7 +220,7 @@ def buscar_grafico(parroquia, carpeta):
 
 def insertar_grafico_en_word(doc, img_path, ruta_excel):
     """
-    Inserta el gráfico en el documento Word después del texto 'RESULTADOS CONECEL S.A.'.
+    Inserta el gráfico en el documento Word después del texto 'RESULTADOS'.
     """
     st.write(f"[DEBUG] Insertando gráfico en el documento")
     encontrado = False
@@ -166,7 +228,7 @@ def insertar_grafico_en_word(doc, img_path, ruta_excel):
 
     # Buscar el párrafo exacto donde aparece "RESULTADOS CONECEL S.A."
     for i, para in enumerate(doc.paragraphs):
-        if "RESULTADOS CONECEL S.A." in para.text:
+        if "RESULTADOS CONECEL S.A." in para.text or "RESULTADOS OTECEL S.A." in para.text:
             st.write(f"[DEBUG] Sección encontrada en el párrafo {i}")
             posicion = i
             encontrado = True
@@ -247,13 +309,92 @@ def ajustar_margenes(doc):
 
     st.write("[DEBUG] Márgenes ajustados correctamente.")
 
+def buscar_imagen_correccion_mapa(parroquia, carpeta):
+    """
+    Busca una imagen PNG o JPEG en la carpeta especificada que contenga el nombre de la parroquia.
+    """
+    st.write(f"[DEBUG] Buscando imagen de corrección de mapa para {parroquia} en {carpeta}")
+    for archivo in os.listdir(carpeta):
+        if archivo.lower().endswith((".png", ".jpeg", ".jpg")) and parroquia.upper() in archivo.upper():
+            img_path = os.path.join(carpeta, archivo)
+            st.write(f"[DEBUG] Imagen de corrección de mapa encontrada: {img_path}")
+            return img_path
+    return None
+
+def insertar_imagen_correccion_mapa(doc, img_path):
+    """
+    Inserta la imagen de corrección de mapa en el documento Word después de 'Imagen 3.- Porcentaje de Cobertura WCDMA (3G), parámetro RSCP.'.
+    """
+    st.write(f"[DEBUG] Insertando imagen de corrección de mapa en el documento")
+    encontrado = False
+    posicion = -1
+
+    # Buscar el párrafo exacto donde aparece "Imagen 3.- Porcentaje de Cobertura WCDMA (3G), parámetro RSCP."
+    for i, para in enumerate(doc.paragraphs):
+        if "Imagen 3.- Porcentaje de Cobertura WCDMA (3G), parámetro RSCP." in para.text:
+            st.write(f"[DEBUG] Sección encontrada en el párrafo {i}")
+            posicion = i
+            encontrado = True
+            break
+
+    if encontrado and posicion != -1:
+        # Insertar la imagen directamente después del párrafo encontrado
+        st.write(f"[DEBUG] Insertando imagen de corrección de mapa en el párrafo {posicion + 1}")
+        run = doc.paragraphs[posicion].add_run()
+        run.add_picture(img_path, width=Inches(6))  # Ajustar el ancho a 6 pulgadas (más razonable)
+
+        # Agregar el texto "Imagen 4.- Correción mapa de cobertura." con fuente Arial 9 y "Imagen.-" en negrita
+        new_para = doc.add_paragraph()
+        new_run = new_para.add_run("Imagen 4.- ")
+        new_run.font.name = 'Arial'
+        new_run.font.size = Pt(9)
+        new_run.bold = True
+        new_run = new_para.add_run("Corrección mapa de cobertura.")
+        new_run.font.name = 'Arial'
+        new_run.font.size = Pt(9)
+        new_para.alignment = 1 # Centrar el texto
+
+        st.write("[DEBUG] Imagen de corrección de mapa insertada correctamente.")
+    else:
+        st.error("[ERROR] No se encontró la sección 'Imagen 3.- Porcentaje de Cobertura WCDMA (3G), parámetro RSCP.' en el documento.")
+
+# ----------------- Funciones para convertir Word a PDF -----------------
+
+def convert_word_to_pdf(doc_path, pdf_path):
+    """
+    Convierte un documento de Word a PDF usando PyMuPDF.
+    """
+    doc = fitz.open(doc_path)
+    pdf_bytes = doc.convert_to_pdf()
+    with open(pdf_path, "wb") as f:
+        f.write(pdf_bytes)
+    st.write(f"[DEBUG] Documento Word convertido a PDF y guardado en: {pdf_path}")
+
+
+
 # ----------------- Interfaz de Streamlit -----------------
 
-st.title("Visualizador y Actualizador de Datos de Cobertura")
-st.write("Carga un archivo Excel (.xls o .xlsx) con una hoja llamada 'COBERTURA' y un archivo Word (.docx).")
+st.title("Informes de Cobertura SMA")
 
 # Carga de archivos para la parte de datos y para el documento Word
-uploaded_excel = st.file_uploader("Cargar archivo Excel", type=["xls", "xlsx"])
+col1, col2 = st.columns(2)
+with col1:
+    uploaded_excel = st.file_uploader("Cargar archivo Consolidado Excel", type=["xls", "xlsx"])
+with col2:
+    uploaded_word = st.file_uploader("Cargar modelo de informe Word", type=["docx"])
+
+# Botón de descarga al lado de la carga del informe de Word
+if uploaded_word is not None:
+    modified_filename = f"modified_{uploaded_word.name}"
+    if os.path.exists(modified_filename):
+        with open(modified_filename, "rb") as file:
+            st.download_button(
+                label="Descargar archivo Word modificado",
+                data=file,
+                file_name=modified_filename,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
 supervisors = [
     "Ing. Mauricio Sánchez Pinos",
     "Ing. Mesías Vizuete López",
@@ -261,10 +402,9 @@ supervisors = [
     "Ing. Ramiro Hurtado Figueroa"
 ]
 selected_supervisor = st.selectbox("Selecciona al supervisor:", supervisors)
-uploaded_word = st.file_uploader("Cargar archivo Word", type=["docx"])
 
 # Campo de texto para ingresar la ruta de la carpeta con los archivos Excel de gráficos
-carpeta_graficos = st.text_input("Ingresa la ruta completa de la carpeta con archivos Excel de gráficos",
+carpeta_graficos = st.text_input("Ingresa la ruta completa de la carpeta con archivos Excel y gráficos operadora",
                                   value=st.session_state.get("carpeta_graficos", ""))
 st.session_state.carpeta_graficos = carpeta_graficos
 
@@ -272,6 +412,9 @@ st.session_state.carpeta_graficos = carpeta_graficos
 carpeta_imagenes = st.text_input("Ingresa la ruta completa de la carpeta con las imágenes de encabezado y pie de página",
                                   value=st.session_state.get("carpeta_imagenes", ""))
 st.session_state.carpeta_imagenes = carpeta_imagenes
+
+# Campo de texto para ingresar recomendaciones
+recomendaciones = st.text_area("Ingresa recomendaciones (opcional):")
 
 if uploaded_excel is not None and uploaded_word is not None:
     try:
@@ -348,7 +491,7 @@ if uploaded_excel is not None and uploaded_word is not None:
                 }
 
                 # Procesa el documento: reemplaza marcadores en el cuerpo, encabezados y pies
-                process_doc_elements(doc, placeholders, selected_supervisor)
+                process_doc_elements(doc, placeholders, selected_supervisor, recomendaciones)
                 process_headers_and_footers(doc, placeholders)
 
                 # Busca el archivo Excel que contenga la parroquia para extraer el gráfico
@@ -361,14 +504,9 @@ if uploaded_excel is not None and uploaded_word is not None:
                         # Insertar la imagen directamente en el mismo documento
                         insertar_grafico_en_word(doc, img_path, ruta_excel_graf)
 
-                        # Guardar el archivo modificado final
-                        modified_filename = f"modified_{filename}"
-                        doc.save(modified_filename)
-                        st.write(f"[DEBUG] Documento modificado guardado: {modified_filename}")
-
                         # Eliminar la imagen temporal después de insertarla
                         os.remove(img_path)
-                        st.success("Gráfico insertado en la sección 'RESULTADOS CONECEL S.A.'")
+                        st.success("Gráfico insertado en la sección 'RESULTADOS'")
                     else:
                         st.warning("No se encontró un archivo Excel con la parroquia en el nombre o el gráfico no pudo extraerse.")
                 else:
@@ -385,23 +523,25 @@ if uploaded_excel is not None and uploaded_word is not None:
                         # Ajustar márgenes del documento
                         ajustar_margenes(doc)
 
-                        # Guardar el archivo modificado final
-                        modified_filename = f"{numero_informe}_{filename}"
-                        doc.save(modified_filename)
-                        st.write(f"[DEBUG] Documento modificado guardado: {modified_filename}")
+                # Si modificar_mapa_de_cobertura_operadora es "SI", insertar la imagen de corrección de mapa
+                if modificar_mapa_de_cobertura_operadora.upper() == "SI":
+                    img_correccion_path = buscar_imagen_correccion_mapa(parroquia, ruta_carpeta)
+                    if img_correccion_path:
+                        insertar_imagen_correccion_mapa(doc, img_correccion_path)
 
-                        # Ofrecer el archivo modificado para su descarga
-                        with open(modified_filename, "rb") as file:
-                            st.download_button(
-                                label="Descargar archivo Word modificado",
-                                data=file,
-                                file_name=modified_filename,
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
-                    else:
-                        st.warning("No se encontraron las imágenes 'encabezado' y 'pie de página' en la carpeta especificada.")
-                else:
-                    st.write("[DEBUG] La variable 'carpeta_imagenes' está vacía. Ingrese una ruta válida en el campo de texto.")
+                # Guardar el archivo modificado final
+                modified_filename = f"{numero_informe}_{filename}"
+                doc.save(modified_filename)
+                st.write(f"[DEBUG] Documento modificado guardado: {modified_filename}")
+
+                # Ofrecer el archivo modificado para su descarga
+                with open(modified_filename, "rb") as file:
+                    st.download_button(
+                        label="Descargar archivo Word modificado",
+                        data=file,
+                        file_name=modified_filename,
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
 
             else:
                 st.error(f"No se encontraron datos para la parroquia {parroquia} con tecnología {tecnologia} y operadora {operadora}.")

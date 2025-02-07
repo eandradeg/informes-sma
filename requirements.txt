@@ -3,4 +3,4 @@ pandas
 openpyxl
 python-dotenv
 python-docx
-xlwings
+docx2pdf
